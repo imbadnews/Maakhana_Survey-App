@@ -1,7 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, addDoc, serverTimestamp } from 'firebase/firestore';
-import { getAuth, signInAnonymously, signInWithCustomToken } from 'firebase/auth';
+import {
+  getAuth,
+  signInWithPopup,
+  GoogleAuthProvider,
+  onAuthStateChanged,
+  signOut
+} from 'firebase/auth';
 import {
   ArrowRight,
   MapPin,
@@ -16,11 +22,12 @@ import {
   Flame,
   Gift,
   Truck,
-  Clock
+  Clock,
+  LogOut
 } from 'lucide-react';
 
 // --- Firebase Configuration ---
-// Configured for project: maakhana-survey
+
 const firebaseConfig = {
   apiKey: "AIzaSyCxKxj-xizsm_5nYhhpzVIgPcDCxCERTeE",
   authDomain: "maakhana-survey.firebaseapp.com",
@@ -31,11 +38,13 @@ const firebaseConfig = {
   measurementId: "G-ZD7JV8263B"
 };
 
+
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
-const appId = 'maakhana-web-v1';
+const googleProvider = new GoogleAuthProvider();
+const appId = 'maakhana-survey-v2';
 
 // --- Custom Logo Component ---
 const GenZLogo = ({ className }) => (
@@ -53,39 +62,56 @@ const GenZLogo = ({ className }) => (
 // --- Main Component ---
 export default function MaakhanaApp() {
   // State
+  const [user, setUser] = useState(null); // Stores logged-in user info
   const [step, setStep] = useState(0);
   const [loading, setLoading] = useState(false);
   const [completed, setCompleted] = useState(false);
   const [animating, setAnimating] = useState(false);
 
   const [formData, setFormData] = useState({
-    userType: '', // 'student' | 'professional'
-    livingSituation: '', // 'pg' | 'hostel' | 'flat'
-    location: '', // 'noida' | 'greater_noida' | 'delhi'
-    mealFrequency: '', // '2_meals' | '3_meals'
+    userType: '',
+    livingSituation: '',
+    location: '',
+    mealFrequency: '',
     needsProtein: false,
     needsExtraServing: false,
-    isGymBro: false, // New Gym Bro Package
-    budgetPerMeal: 110, // Default starting
+    isGymBro: false,
+    budgetPerMeal: 110,
     name: '',
     contact: '',
     email: '',
     wantsTrial: false
   });
 
-  // Auth Initialization
+  // Auth Listener
   useEffect(() => {
-    const initAuth = async () => {
-      try {
-        // We use anonymous auth for the public survey
-        // This requires "Anonymous" to be enabled in Firebase Console -> Authentication
-        await signInAnonymously(auth);
-      } catch (error) {
-        console.error("Auth error:", error);
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      if (currentUser) {
+        setUser(currentUser);
+        // Auto-fill form data from Google Profile
+        setFormData(prev => ({
+          ...prev,
+          name: currentUser.displayName || '',
+          email: currentUser.email || ''
+        }));
+      } else {
+        setUser(null);
       }
-    };
-    initAuth();
+    });
+    return () => unsubscribe();
   }, []);
+
+  // Google Login Handler
+  const handleGoogleLogin = async () => {
+    try {
+      await signInWithPopup(auth, googleProvider);
+      // Automatically move to next step upon successful login
+      handleNext();
+    } catch (error) {
+      console.error("Login Failed:", error);
+      alert("Login failed. Please try again.");
+    }
+  };
 
   // Calculate dynamic minimum price
   const basePrice = 110;
@@ -93,7 +119,6 @@ export default function MaakhanaApp() {
   const servingSurge = 20;
   const gymBroSurge = 100; // Premium package price
 
-  // Logic: Gym Bro package (+100) replaces the standard Protein (+40) charge if selected
   const currentMinPrice = basePrice +
     (formData.isGymBro ? gymBroSurge : (formData.needsProtein ? proteinSurge : 0)) +
     (formData.needsExtraServing ? servingSurge : 0);
@@ -126,7 +151,6 @@ export default function MaakhanaApp() {
     setFormData(prev => ({
         ...prev,
         isGymBro: newState,
-        // Removed forced meal frequency override
         needsProtein: newState ? false : prev.needsProtein
     }));
   };
@@ -134,18 +158,19 @@ export default function MaakhanaApp() {
   const handleSubmit = async () => {
     setLoading(true);
     try {
-      const user = auth.currentUser;
       if (!user) {
-        await signInAnonymously(auth);
+        alert("Please sign in to submit.");
+        setLoading(false);
+        return;
       }
 
-      // Save directly to the 'maakhana_responses' collection
-      // NOTE: This collection will be created automatically when the first doc is added
+      // Save to Firebase
       await addDoc(collection(db, 'maakhana_responses'), {
         ...formData,
         minPriceCalculated: currentMinPrice,
         timestamp: serverTimestamp(),
-        uid: user?.uid || 'anonymous',
+        uid: user.uid,
+        authProvider: 'google',
         appVersion: appId
       });
 
@@ -164,7 +189,7 @@ export default function MaakhanaApp() {
 
   // --- Render Steps ---
 
-  // Welcome Screen
+  // Welcome Screen (With Google Login)
   if (step === 0) {
     return (
       <div className="min-h-screen bg-stone-50 text-stone-900 font-sans flex flex-col items-center justify-center p-6 relative overflow-hidden">
@@ -181,14 +206,35 @@ export default function MaakhanaApp() {
             Scheduled drops that fit your clock.
           </p>
 
-          <div className="pt-8">
-            <button
-              onClick={handleNext}
-              className="group relative w-full bg-stone-900 text-white py-4 rounded-xl font-bold text-lg hover:bg-orange-600 transition-all duration-300 shadow-xl hover:shadow-2xl hover:-translate-y-1"
-            >
-              Start the Vibe Check
-              <ArrowRight className="inline ml-2 group-hover:translate-x-1 transition-transform" />
-            </button>
+          <div className="pt-8 space-y-4">
+            {user ? (
+              // If user is already logged in
+              <div className="space-y-4">
+                <div className="bg-green-100 text-green-800 p-3 rounded-xl font-bold flex items-center justify-center gap-2">
+                  <CheckCircle2 size={20} />
+                  Signed in as {user.displayName}
+                </div>
+                <button
+                  onClick={handleNext}
+                  className="group relative w-full bg-stone-900 text-white py-4 rounded-xl font-bold text-lg hover:bg-orange-600 transition-all duration-300 shadow-xl hover:shadow-2xl hover:-translate-y-1"
+                >
+                  Start the Vibe Check
+                  <ArrowRight className="inline ml-2 group-hover:translate-x-1 transition-transform" />
+                </button>
+                <button onClick={() => signOut(auth)} className="text-stone-400 text-sm font-bold hover:text-stone-600 underline">
+                  Sign Out
+                </button>
+              </div>
+            ) : (
+              // If user is NOT logged in
+              <button
+                onClick={handleGoogleLogin}
+                className="group relative w-full bg-white text-stone-900 border-2 border-stone-200 py-4 rounded-xl font-bold text-lg hover:border-orange-500 hover:text-orange-600 transition-all duration-300 shadow-lg hover:shadow-xl flex items-center justify-center gap-3"
+              >
+                <img src="https://www.svgrepo.com/show/475656/google-color.svg" alt="Google" className="w-6 h-6" />
+                Sign in with Google
+              </button>
+            )}
           </div>
           <p className="text-xs text-stone-400 uppercase tracking-widest mt-8 font-bold">
             Delivering: Noida • Greater Noida • Delhi (Soon)
@@ -525,19 +571,21 @@ export default function MaakhanaApp() {
           {step === 6 && (
             <div className="space-y-8">
               <span className="text-orange-600 font-bold tracking-wider text-sm uppercase">Final Step</span>
-              <h2 className="text-3xl font-bold text-stone-900">Where should we reach you?</h2>
+              <h2 className="text-3xl font-bold text-stone-900">Confirm details.</h2>
 
               <div className="space-y-4">
-                <div>
-                    <label className="block text-sm font-bold text-stone-700 mb-2 ml-1">Your Name</label>
-                    <input
-                        type="text"
-                        placeholder="e.g. Aryan Gupta"
-                        className="w-full p-4 bg-white border-2 border-stone-200 rounded-xl focus:border-orange-500 focus:outline-none transition-colors font-medium"
-                        value={formData.name}
-                        onChange={(e) => updateData('name', e.target.value)}
-                    />
+                {/* Auto-filled Info from Google */}
+                <div className="bg-stone-100 p-4 rounded-xl flex items-center gap-3 border border-stone-200">
+                  <div className="w-10 h-10 bg-orange-100 rounded-full flex items-center justify-center text-orange-600 font-bold text-lg">
+                    {formData.name.charAt(0).toUpperCase()}
+                  </div>
+                  <div>
+                    <p className="font-bold text-stone-900">{formData.name}</p>
+                    <p className="text-xs text-stone-500">{formData.email}</p>
+                  </div>
+                  <CheckCircle2 className="ml-auto text-green-500" size={24} />
                 </div>
+
                 <div>
                     <label className="block text-sm font-bold text-stone-700 mb-2 ml-1">WhatsApp / Phone</label>
                     <input
@@ -546,16 +594,6 @@ export default function MaakhanaApp() {
                         className="w-full p-4 bg-white border-2 border-stone-200 rounded-xl focus:border-orange-500 focus:outline-none transition-colors font-medium"
                         value={formData.contact}
                         onChange={(e) => updateData('contact', e.target.value)}
-                    />
-                </div>
-                <div>
-                    <label className="block text-sm font-bold text-stone-700 mb-2 ml-1">Email Address</label>
-                    <input
-                        type="email"
-                        placeholder="aryan@example.com"
-                        className="w-full p-4 bg-white border-2 border-stone-200 rounded-xl focus:border-orange-500 focus:outline-none transition-colors font-medium"
-                        value={formData.email}
-                        onChange={(e) => updateData('email', e.target.value)}
                     />
                 </div>
 
@@ -581,12 +619,12 @@ export default function MaakhanaApp() {
 
                <button
                 onClick={handleSubmit}
-                disabled={!formData.name || !formData.contact || !formData.email || loading}
+                disabled={!formData.contact || loading}
                 className="w-full bg-stone-900 text-white py-4 rounded-xl font-bold mt-6 flex items-center justify-center gap-2 hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
               >
                 {loading ? <Loader2 className="animate-spin" /> : 'Send it'}
               </button>
-              <p className="text-xs text-center text-stone-400 mt-4">By sending this, you are showing interest. No commitments yet.</p>
+              <p className="text-xs text-center text-stone-400 mt-4">We respect your privacy. No spam.</p>
             </div>
           )}
 
